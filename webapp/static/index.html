@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Voice Notion Agent — Live Demo</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 640px;
+    margin: 40px auto;
+    padding: 0 16px;
+    background: #0b0e14;
+    color: #e6e6e6;
+  }
+  h1 { font-size: 1.4rem; }
+  p.sub { color: #999; margin-top: -8px; }
+  #log {
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 12px;
+    min-height: 220px;
+    max-height: 360px;
+    overflow-y: auto;
+    margin-bottom: 16px;
+    background: #12151c;
+  }
+  .msg { margin-bottom: 10px; line-height: 1.4; }
+  .you { color: #7dd3fc; }
+  .agent { color: #86efac; }
+  button {
+    font-size: 1rem;
+    padding: 12px 20px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    margin-right: 8px;
+    user-select: none;
+  }
+  #recordBtn { background: #ef4444; color: white; }
+  #recordBtn.recording { background: #991b1b; }
+  #textForm { display: flex; gap: 8px; margin-top: 20px; }
+  input[type="text"] {
+    flex: 1;
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid #333;
+    background: #12151c;
+    color: #eee;
+    font-size: 1rem;
+  }
+  #status { color: #999; font-size: 0.9rem; margin-top: 10px; min-height: 1.2em; }
+  #meterTrack {
+    width: 100%;
+    max-width: 300px;
+    height: 10px;
+    border-radius: 5px;
+    background: #1e2230;
+    overflow: hidden;
+    margin-top: 6px;
+    display: none;
+  }
+  #meterTrack.active { display: block; }
+  #meterFill {
+    height: 100%;
+    width: 0%;
+    background: #4ade80;
+    transition: width 60ms linear;
+  }
+  #meterFill.silent { background: #ef4444; }
+</style>
+</head>
+<body>
+  <h1>🎙️ Voice Notion Agent — Live Demo</h1>
+  <p class="sub">Hold the button and speak, or type a command below.</p>
+
+  <div id="log"></div>
+
+  <button id="recordBtn">🎤 Hold to talk</button>
+  <div id="status"></div>
+  <div id="meterTrack"><div id="meterFill"></div></div>
+
+  <form id="textForm">
+    <input type="text" id="textInput" placeholder="Save an idea: ..." autocomplete="off" />
+    <button type="submit">Send</button>
+  </form>
+
+  <audio id="player" hidden></audio>
+
+<script>
+const sessionId = localStorage.getItem("session_id") || crypto.randomUUID();
+localStorage.setItem("session_id", sessionId);
+
+// If the page was opened as .../?key=SECRET, forward that as the demo access key.
+const accessKey = new URLSearchParams(window.location.search).get("key");
+function withKey(path) {
+  return accessKey ? `${path}?key=${encodeURIComponent(accessKey)}` : path;
+}
+
+const log = document.getElementById("log");
+const statusEl = document.getElementById("status");
+const player = document.getElementById("player");
+const recordBtn = document.getElementById("recordBtn");
+const meterTrack = document.getElementById("meterTrack");
+const meterFill = document.getElementById("meterFill");
+
+function addMessage(who, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + who;
+  div.textContent = (who === "you" ? "You: " : "Agent: ") + text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+document.getElementById("textForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = document.getElementById("textInput");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  addMessage("you", text);
+  statusEl.textContent = "Thinking...";
+
+  const form = new FormData();
+  form.append("message", text);
+  form.append("session_id", sessionId);
+
+  try {
+    const res = await fetch(withKey("/api/chat"), { method: "POST", body: form });
+    const data = await res.json();
+    addMessage("agent", data.reply);
+  } catch (err) {
+    addMessage("agent", "Something went wrong: " + err);
+  } finally {
+    statusEl.textContent = "";
+  }
+});
+
+let mediaRecorder, chunks = [], recordingStartedAt = 0;
+
+// Let the browser pick a codec it actually supports rather than assuming
+// webm/opus - Chrome, Firefox, and Safari don't all agree, and sending a
+// blob mislabeled as the wrong container is what causes OpenAI's
+// "could not be decoded" error.
+const PREFERRED_MIME_TYPES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/mp4",
+];
+function pickSupportedMimeType() {
+  return PREFERRED_MIME_TYPES.find((t) => MediaRecorder.isTypeSupported(t)) || "";
+}
+function extensionFor(mimeType) {
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("mp4")) return "mp4";
+  return "webm";
+}
+
+// Whisper hallucinates stock phrases like "you" or "Thank you." when fed a
+// very short or near-silent clip instead of returning empty - so we reject
+// short holds client-side rather than sending them and getting a
+// confusing wrong transcript back.
+const MIN_RECORDING_MS = 1000;
+// Below this, we treat the clip as silence (mic muted/wrong device) rather
+// than send it to Whisper, which would otherwise hallucinate "you" or
+// similar on near-empty audio instead of returning nothing.
+const SILENCE_PEAK_THRESHOLD = 0.03;
+let recordingTimer = null;
+
+// Live mic level meter via Web Audio, independent of MediaRecorder - lets
+// you SEE whether the browser is actually receiving signal from your mic
+// before it ever gets sent anywhere.
+let audioCtx = null, analyser = null, meterRAF = null, peakLevel = 0;
+
+function startMeter(stream) {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  audioCtx.createMediaStreamSource(stream).connect(analyser);
+  peakLevel = 0;
+  meterTrack.classList.add("active");
+
+  const data = new Uint8Array(analyser.fftSize);
+  const tick = () => {
+    analyser.getByteTimeDomainData(data);
+    let peak = 0;
+    for (let i = 0; i < data.length; i++) {
+      peak = Math.max(peak, Math.abs(data[i] - 128) / 128);
+    }
+    peakLevel = Math.max(peakLevel, peak);
+    meterFill.style.width = `${Math.min(100, peak * 100 * 3)}%`;
+    meterFill.classList.toggle("silent", peakLevel < SILENCE_PEAK_THRESHOLD);
+    meterRAF = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopMeter() {
+  if (meterRAF) cancelAnimationFrame(meterRAF);
+  meterRAF = null;
+  if (audioCtx) audioCtx.close();
+  audioCtx = null;
+  meterTrack.classList.remove("active");
+  meterFill.style.width = "0%";
+}
+
+async function startRecording() {
+  if (mediaRecorder && mediaRecorder.state === "recording") return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = pickSupportedMimeType();
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    chunks = [];
+    mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+    mediaRecorder.onstop = onRecordingStop;
+    mediaRecorder.start();
+    startMeter(stream);
+    recordingStartedAt = performance.now();
+    recordBtn.classList.add("recording");
+    statusEl.textContent = "Recording... 0.0s (hold at least 1s)";
+    recordingTimer = setInterval(() => {
+      const secs = ((performance.now() - recordingStartedAt) / 1000).toFixed(1);
+      statusEl.textContent = `Recording... ${secs}s (hold at least 1s)`;
+    }, 100);
+  } catch (err) {
+    statusEl.textContent = "Microphone unavailable: " + err;
+  }
+}
+
+function stopRecording() {
+  if (recordingTimer) {
+    clearInterval(recordingTimer);
+    recordingTimer = null;
+  }
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+  }
+}
+
+async function onRecordingStop() {
+  recordBtn.classList.remove("recording");
+  stopMeter();
+
+  const heldMs = performance.now() - recordingStartedAt;
+  if (heldMs < MIN_RECORDING_MS) {
+    statusEl.textContent = "Too short — press and hold while you speak.";
+    return;
+  }
+
+  if (peakLevel < SILENCE_PEAK_THRESHOLD) {
+    statusEl.textContent =
+      "No audio detected — check that the right microphone is selected and unmuted (see the level meter while recording).";
+    console.warn("Recorded clip peak level:", peakLevel, "- treating as silence, not sending to server.");
+    return;
+  }
+
+  statusEl.textContent = "Transcribing...";
+
+  const mimeType = mediaRecorder.mimeType || "audio/webm";
+  const blob = new Blob(chunks, { type: mimeType });
+  const form = new FormData();
+  form.append("audio", blob, `command.${extensionFor(mimeType)}`);
+  form.append("session_id", sessionId);
+
+  try {
+    const res = await fetch(withKey("/api/voice"), { method: "POST", body: form });
+    const data = await res.json();
+    console.log("Transcribed text:", data.transcript);
+
+    if (data.transcript) {
+      addMessage("you", data.transcript);
+      statusEl.textContent = `Heard: "${data.transcript}"`;
+    } else {
+      statusEl.textContent = "";
+    }
+    addMessage("agent", data.reply);
+
+    if (data.audio_base64) {
+      player.src = "data:audio/mpeg;base64," + data.audio_base64;
+      player.hidden = false;
+      await player.play();
+    }
+  } catch (err) {
+    addMessage("agent", "Something went wrong: " + err);
+    statusEl.textContent = "";
+  }
+}
+
+recordBtn.addEventListener("mousedown", startRecording);
+recordBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
+recordBtn.addEventListener("mouseup", stopRecording);
+recordBtn.addEventListener("mouseleave", stopRecording);
+recordBtn.addEventListener("touchend", stopRecording);
+</script>
+</body>
+</html>

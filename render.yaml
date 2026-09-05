@@ -1,0 +1,45 @@
+# Uses the Dockerfile (Python + Node.js) because the Gmail/Notion MCP
+# servers are launched via npx at runtime - a plain Python buildpack
+# service has no Node.js and npx would fail.
+#
+# Read the "Deploying the web demo" section in README.md before using
+# this. In short:
+#   - GMAIL_MCP_TAR_B64 / MCP_AUTH_TAR_B64 carry your local one-time-login
+#     tokens into the container (generate them with
+#     scripts/pack_mcp_tokens.py) - Render's disk is ephemeral, so
+#     docker-entrypoint.sh restores them from these env vars on every boot.
+#   - DEMO_ACCESS_KEY gates /api/chat and /api/voice - set it before this
+#     service is reachable on a public URL, since the agent has real
+#     Gmail read/send access and these endpoints have no login otherwise.
+services:
+  - type: web
+    name: voice-notion-agent-demo
+    env: docker
+    plan: free
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: DEMO_ACCESS_KEY
+        sync: false
+      - key: GMAIL_MCP_TAR_B64
+        sync: false
+      - key: MCP_AUTH_TAR_B64
+        sync: false
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_ENDPOINT
+        value: https://api.smith.langchain.com
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGSMITH_PROJECT
+        value: voice-agent-demo
+      - key: CHAT_MODEL
+        value: gpt-4o-mini
+      - key: STT_MODEL
+        value: whisper-1
+      - key: TTS_MODEL
+        value: tts-1
+      - key: TTS_VOICE
+        value: alloy
