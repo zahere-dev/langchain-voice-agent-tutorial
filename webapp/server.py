@@ -9,23 +9,23 @@ id. That's fine for a single-instance demo deployment; it is not meant to
 survive restarts or scale beyond one process.
 
 SECURITY NOTE: the agent now has real Gmail (read/send) and Notion access
-via MCP, and these endpoints have no login of their own. If DEMO_ACCESS_KEY
-is set, /api/chat and /api/voice require it (?key=... or an X-Demo-Key
-header) - set it before exposing this on a public URL, otherwise anyone
-with the link can read or send from your real Gmail account. See
-README.md for why the recommended path for recording a demo is running
-this locally instead of deploying it publicly.
+via MCP. If AUTH_PASSWORD is set, every route (including the page itself)
+requires HTTP Basic Auth - the browser's native login prompt, checked
+against AUTH_USERNAME/AUTH_PASSWORD. Set this before exposing the service
+on a public URL, otherwise anyone with the link can read or send from your
+real Gmail account.
 """
 import base64
 import os
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from langchain.messages import HumanMessage
 from openai import BadRequestError
 
@@ -40,13 +40,31 @@ config.validate()
 _agent = None
 _sessions: dict[str, list] = {}
 _MAX_HISTORY_MESSAGES = 20
-_DEMO_ACCESS_KEY = os.getenv("DEMO_ACCESS_KEY")
+
+_AUTH_USERNAME = os.getenv("AUTH_USERNAME", "demo")
+_AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
+_basic_auth = HTTPBasic(auto_error=False)
 
 
-def _require_access_key(key: str | None = None, x_demo_key: str | None = Header(default=None)) -> None:
-    """No-op if DEMO_ACCESS_KEY isn't set; otherwise requires a matching key."""
-    if _DEMO_ACCESS_KEY and _DEMO_ACCESS_KEY not in (key, x_demo_key):
-        raise HTTPException(status_code=401, detail="Missing or invalid access key.")
+def _require_auth(credentials: HTTPBasicCredentials | None = Depends(_basic_auth)) -> None:
+    """No-op if AUTH_PASSWORD isn't set; otherwise requires matching HTTP Basic Auth.
+
+    auto_error=False on HTTPBasic means a missing Authorization header comes
+    back as None instead of an immediate 401 - that's what lets local dev
+    (no AUTH_PASSWORD set) skip auth entirely rather than always prompting.
+    """
+    if not _AUTH_PASSWORD:
+        return
+    valid = credentials is not None and (
+        secrets.compare_digest(credentials.username, _AUTH_USERNAME)
+        and secrets.compare_digest(credentials.password, _AUTH_PASSWORD)
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
 
 
 @asynccontextmanager
@@ -65,10 +83,9 @@ app.add_middleware(
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/")
+@app.get("/", dependencies=[Depends(_require_auth)])
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
@@ -85,14 +102,14 @@ async def _run_agent_turn(session_id: str, transcript: str) -> str:
     return reply
 
 
-@app.post("/api/chat", dependencies=[Depends(_require_access_key)])
+@app.post("/api/chat", dependencies=[Depends(_require_auth)])
 async def chat(message: str = Form(...), session_id: str = Form(...)) -> JSONResponse:
     """Text-only turn, used by the web UI's fallback text box."""
     reply = await _run_agent_turn(session_id, message)
     return JSONResponse({"transcript": message, "reply": reply})
 
 
-@app.post("/api/voice", dependencies=[Depends(_require_access_key)])
+@app.post("/api/voice", dependencies=[Depends(_require_auth)])
 async def voice(audio: UploadFile = File(...), session_id: str = Form(...)) -> JSONResponse:
     """Voice turn: browser sends a recorded clip, we return text + spoken reply."""
     # Keep whatever extension the browser actually sent (webm/ogg/mp4) -

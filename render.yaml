@@ -8,9 +8,10 @@
 #     tokens into the container (generate them with
 #     scripts/pack_mcp_tokens.py) - Render's disk is ephemeral, so
 #     docker-entrypoint.sh restores them from these env vars on every boot.
-#   - DEMO_ACCESS_KEY gates /api/chat and /api/voice - set it before this
+#   - AUTH_USERNAME / AUTH_PASSWORD gate the entire app (including the page
+#     itself) behind HTTP Basic Auth - set AUTH_PASSWORD before this
 #     service is reachable on a public URL, since the agent has real
-#     Gmail read/send access and these endpoints have no login otherwise.
+#     Gmail read/send access and there's no login otherwise.
 services:
   - type: web
     name: voice-notion-agent-demo
@@ -21,7 +22,9 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
-      - key: DEMO_ACCESS_KEY
+      - key: AUTH_USERNAME
+        value: demo
+      - key: AUTH_PASSWORD
         sync: false
       - key: GMAIL_MCP_TAR_B64
         sync: false

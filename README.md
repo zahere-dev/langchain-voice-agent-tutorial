@@ -239,14 +239,16 @@ just in a browser tab.
 
 ### ⚠️ Before exposing this publicly
 
-This version has real Gmail read/send access, and `webapp/server.py` has
-no login of its own. **Set `DEMO_ACCESS_KEY` before this service is
-reachable on a public URL** — without it, anyone with the link can read
-your inbox or send mail as you. It's checked on every `/api/chat` and
-`/api/voice` call; the front-end reads `?key=...` from the page URL and
-forwards it automatically, so share the link as
-`https://.../?key=<secret>`. Recording locally and screen-sharing is still
-the simplest option if you don't need a live shareable link at all.
+This version has real Gmail read/send access. **Set `AUTH_PASSWORD` before
+this service is reachable on a public URL** — without it, anyone with the
+link can read your inbox or send mail as you. When set, every route
+(including the page itself, not just the API calls) requires HTTP Basic
+Auth: the browser's native login prompt, checked against
+`AUTH_USERNAME`/`AUTH_PASSWORD` (username defaults to `demo`). There's
+nothing to forward manually — visiting the URL just prompts for
+credentials, and the browser remembers them for the session. Recording
+locally and screen-sharing is still the simplest option if you don't need
+a live shareable link at all.
 
 ### Why not Vercel
 
@@ -287,8 +289,8 @@ two base64 env vars, and `scripts/pack_mcp_tokens.py` generates them:
    marks `sync: false`:
    - `OPENAI_API_KEY`, `TAVILY_API_KEY`
    - `GMAIL_MCP_TAR_B64`, `MCP_AUTH_TAR_B64` — the two blobs from step 1
-   - `DEMO_ACCESS_KEY` — see the warning above; required before sharing
-     the URL with anyone
+   - `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`) — see the warning
+     above; required before sharing the URL with anyone
    - `LANGSMITH_API_KEY`, if you want tracing from the deployed instance too
 5. Deploy. Render gives you a `https://<name>.onrender.com` URL — mic
    access requires HTTPS in the browser, which Render provides by default.

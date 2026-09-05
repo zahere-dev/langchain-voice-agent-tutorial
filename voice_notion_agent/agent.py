@@ -42,15 +42,35 @@ or that you "delegated" something.
 """
 
 
+async def _try_build(build_fn, name: str):
+    """Build a specialist, but never let its failure take down the others.
+
+    A specialist can fail to start for reasons outside our code - an
+    expired/missing MCP auth token, a misconfigured OAuth app, npx unable
+    to reach the network. Without this, asyncio.gather would propagate the
+    first exception and cancel every sibling task, so one bad token would
+    crash the Orchestrator (and both other specialists) entirely.
+    """
+    try:
+        return await build_fn()
+    except Exception as exc:  # noqa: BLE001 - any startup failure is handled the same way
+        print(f"[agent] {name} failed to initialize, it will report itself unavailable: {exc}")
+        return None
+
+
 async def build_agent():
     """Build the three specialists, wrap them as tools, and assemble the Orchestrator."""
     notion_agent, email_agent, research_agent = await asyncio.gather(
-        build_notion_expert(), build_email_expert(), build_researcher()
+        _try_build(build_notion_expert, "notion_expert"),
+        _try_build(build_email_expert, "email_expert"),
+        _try_build(build_researcher, "researcher"),
     )
 
     @tool
     async def notion_expert(request: str) -> str:
         """Delegate a Notion request (search, read, or create pages) to the Notion specialist."""
+        if notion_agent is None:
+            return "The Notion integration isn't available on this server right now."
         log_stage("Orchestrator -> notion_expert", input=request)
         result = await notion_agent.ainvoke({"messages": [HumanMessage(content=request)]})
         output = result["messages"][-1].content
@@ -60,6 +80,8 @@ async def build_agent():
     @tool
     async def email_expert(request: str) -> str:
         """Delegate a Gmail request (check, search, draft, or send email) to the email specialist."""
+        if email_agent is None:
+            return "The Gmail integration isn't available on this server right now."
         log_stage("Orchestrator -> email_expert", input=request)
         result = await email_agent.ainvoke({"messages": [HumanMessage(content=request)]})
         output = result["messages"][-1].content
@@ -69,6 +91,8 @@ async def build_agent():
     @tool
     async def researcher(topic: str) -> str:
         """Delegate a web research request to the research specialist; returns a markdown summary."""
+        if research_agent is None:
+            return "The research tool isn't available on this server right now."
         log_stage("Orchestrator -> researcher", input=topic)
         result = await research_agent.ainvoke({"messages": [HumanMessage(content=topic)]})
         output = result["messages"][-1].content

@@ -91,12 +91,6 @@
 const sessionId = localStorage.getItem("session_id") || crypto.randomUUID();
 localStorage.setItem("session_id", sessionId);
 
-// If the page was opened as .../?key=SECRET, forward that as the demo access key.
-const accessKey = new URLSearchParams(window.location.search).get("key");
-function withKey(path) {
-  return accessKey ? `${path}?key=${encodeURIComponent(accessKey)}` : path;
-}
-
 const log = document.getElementById("log");
 const statusEl = document.getElementById("status");
 const player = document.getElementById("player");
@@ -126,7 +120,7 @@ document.getElementById("textForm").addEventListener("submit", async (e) => {
   form.append("session_id", sessionId);
 
   try {
-    const res = await fetch(withKey("/api/chat"), { method: "POST", body: form });
+    const res = await fetch("/api/chat", { method: "POST", body: form });
     const data = await res.json();
     addMessage("agent", data.reply);
   } catch (err) {
@@ -264,7 +258,7 @@ async function onRecordingStop() {
   form.append("session_id", sessionId);
 
   try {
-    const res = await fetch(withKey("/api/voice"), { method: "POST", body: form });
+    const res = await fetch("/api/voice", { method: "POST", body: form });
     const data = await res.json();
     console.log("Transcribed text:", data.transcript);
 

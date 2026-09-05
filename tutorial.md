@@ -913,20 +913,23 @@ built once at startup rather than per-request:
 """FastAPI web demo: browser mic -> STT -> agent -> Gmail/Notion (MCP) -> TTS -> browser audio.
 
 SECURITY NOTE: the agent now has real Gmail (read/send) and Notion access
-via MCP, and these endpoints have no login of their own. If DEMO_ACCESS_KEY
-is set, /api/chat and /api/voice require it (?key=... or an X-Demo-Key
-header) - set it before exposing this on a public URL.
+via MCP. If AUTH_PASSWORD is set, every route (including the page itself)
+requires HTTP Basic Auth - the browser's native login prompt, checked
+against AUTH_USERNAME/AUTH_PASSWORD. Set this before exposing the service
+on a public URL, otherwise anyone with the link can read or send from your
+real Gmail account.
 """
 import base64
 import os
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from langchain.messages import HumanMessage
 
 from voice_notion_agent import config
@@ -939,13 +942,24 @@ config.validate()
 _agent = None
 _sessions: dict[str, list] = {}
 _MAX_HISTORY_MESSAGES = 20
-_DEMO_ACCESS_KEY = os.getenv("DEMO_ACCESS_KEY")
+
+_AUTH_USERNAME = os.getenv("AUTH_USERNAME", "demo")
+_AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
+_basic_auth = HTTPBasic(auto_error=False)
 
 
-def _require_access_key(key: str | None = None, x_demo_key: str | None = Header(default=None)) -> None:
-    """No-op if DEMO_ACCESS_KEY isn't set; otherwise requires a matching key."""
-    if _DEMO_ACCESS_KEY and _DEMO_ACCESS_KEY not in (key, x_demo_key):
-        raise HTTPException(status_code=401, detail="Missing or invalid access key.")
+def _require_auth(credentials: HTTPBasicCredentials | None = Depends(_basic_auth)) -> None:
+    """No-op if AUTH_PASSWORD isn't set; otherwise requires matching HTTP Basic Auth."""
+    if not _AUTH_PASSWORD:
+        return
+    valid = credentials is not None and (
+        secrets.compare_digest(credentials.username, _AUTH_USERNAME)
+        and secrets.compare_digest(credentials.password, _AUTH_PASSWORD)
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=401, detail="Invalid credentials.", headers={"WWW-Authenticate": "Basic"}
+        )
 
 
 @asynccontextmanager
@@ -964,10 +978,9 @@ app.add_middleware(
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/")
+@app.get("/", dependencies=[Depends(_require_auth)])
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
@@ -981,13 +994,13 @@ async def _run_agent_turn(session_id: str, transcript: str) -> str:
     return messages[-1].content
 
 
-@app.post("/api/chat", dependencies=[Depends(_require_access_key)])
+@app.post("/api/chat", dependencies=[Depends(_require_auth)])
 async def chat(message: str = Form(...), session_id: str = Form(...)) -> JSONResponse:
     reply = await _run_agent_turn(session_id, message)
     return JSONResponse({"transcript": message, "reply": reply})
 
 
-@app.post("/api/voice", dependencies=[Depends(_require_access_key)])
+@app.post("/api/voice", dependencies=[Depends(_require_auth)])
 async def voice(audio: UploadFile = File(...), session_id: str = Form(...)) -> JSONResponse:
     tmp_path = f"/tmp/{uuid.uuid4()}.webm"
     with open(tmp_path, "wb") as f:
@@ -1008,22 +1021,31 @@ async def voice(audio: UploadFile = File(...), session_id: str = Form(...)) -> J
     return JSONResponse({"transcript": transcript, "reply": reply, "audio_base64": audio_b64})
 ```
 
-**Talking point:** "Two things changed from what a Notion-only version of
-this would look like. First, the agent is built once in a `lifespan`
-startup hook with `await build_agent()`, not per-request — spawning two
-npx subprocesses on every HTTP request would be painfully slow. Second,
-there's a `DEMO_ACCESS_KEY` gate on both endpoints. That's not boilerplate
-— once the agent can read and send from a real Gmail account, an
-unauthenticated public endpoint means anyone with the link can do that
-too. This one didn't matter as much back when it was Notion-only; it
-matters a lot now."
+**Talking point:** "Two things worth calling out. First, the agent is
+built once in a `lifespan` startup hook with `await build_agent()`, not
+per-request — spawning MCP subprocesses on every HTTP request would be
+painfully slow. Second, `_require_auth` gates every route with HTTP Basic
+Auth, not just the API endpoints — the page itself is behind the login
+too, so there's nothing to see without credentials. `HTTPBasic(auto_error=False)`
+is the detail that makes this work cleanly for local dev: without it,
+merely declaring the dependency would force a login prompt even when
+`AUTH_PASSWORD` isn't set. With `auto_error=False`, a missing
+`Authorization` header just comes back as `None`, and our own check only
+enforces anything once `AUTH_PASSWORD` is actually configured."
+
+"Also worth noting what's *not* here: no `/static` mount. Earlier drafts
+had one, but nothing in `index.html` ever referenced it — it was dead code
+that also happened to be an auth bypass, since a static file mount doesn't
+inherit a route's `dependencies`. Someone could've hit `/static/index.html`
+directly and skipped the login. Removing unused surface area like that is
+its own kind of security fix."
 
 For the frontend, grab `webapp/static/index.html` from the repo — it's a
 single self-contained page: a push-to-talk record button using the
 browser's `MediaRecorder` API, a text-input fallback, and a hidden
-`<audio>` element that plays back the TTS response. It also reads a `?key=`
-query param from its own URL and forwards it as the access key on every
-API call, so a gated deployment can still be shared as one link.
+`<audio>` element that plays back the TTS response. It needs no auth logic
+of its own now — the browser's native Basic Auth prompt handles the whole
+flow, and remembers the credentials for the rest of that browser session.
 
 **Checkpoint — run it locally:**
 
@@ -1032,20 +1054,18 @@ uvicorn webapp.server:app --reload --port 8000
 ```
 
 Open `http://localhost:8000`, hold the record button, say a command, and
-watch the same behavior as the CLI demo happen in the browser instead.
+watch the same behavior as the CLI demo happen in the browser instead. Set
+`AUTH_PASSWORD` in `.env` and reload to see the browser's login prompt
+appear.
 
 **On deploying this publicly — talking point, worth saying plainly on
-camera:** "I'm going to record this demo locally rather than push it to a
-public URL, and here's why, because it's a good lesson in itself: this
-agent can read and send from my real Gmail. My FastAPI app has no login
-beyond an optional shared key. And the Gmail/Notion tokens on my laptop
-from the one-time browser logins don't just show up in a fresh cloud
-container — I'd have to provision them there myself. None of that is hard,
-exactly, but it's exactly the kind of thing worth pausing on rather than
-gluing a public URL onto a demo that can act on your real accounts. If you
-do want a shareable link — say, a gated demo for a small private audience
-— the repo's `Dockerfile` and `render.yaml` set up a Python+Node.js
-container and the `DEMO_ACCESS_KEY` gate for that; see README.md."
+camera:** "This agent can read and send from my real Gmail, so before I'd
+ever put this on a public URL I'd set `AUTH_PASSWORD` — that's the
+difference between 'demo I control access to' and 'anyone with the link
+can send email as me.' And the Gmail/Notion tokens on my laptop from the
+one-time browser logins don't just show up in a fresh cloud container —
+the repo's `scripts/pack_mcp_tokens.py` and `docker-entrypoint.sh` handle
+provisioning those; see README.md for the full deploy walkthrough."
 
 ---
 
