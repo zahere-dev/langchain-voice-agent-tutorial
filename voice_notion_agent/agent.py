@@ -42,18 +42,31 @@ or that you "delegated" something.
 """
 
 
+_SPECIALIST_BUILD_TIMEOUT = 20.0
+
+
 async def _try_build(build_fn, name: str):
-    """Build a specialist, but never let its failure take down the others.
+    """Build a specialist, but never let its failure - or hang - take down the others.
 
     A specialist can fail to start for reasons outside our code - an
     expired/missing MCP auth token, a misconfigured OAuth app, npx unable
-    to reach the network. Without this, asyncio.gather would propagate the
-    first exception and cancel every sibling task, so one bad token would
-    crash the Orchestrator (and both other specialists) entirely.
+    to reach the network. Without the try/except, asyncio.gather would
+    propagate the first exception and cancel every sibling task, so one bad
+    token would crash the Orchestrator (and both other specialists)
+    entirely. The timeout matters separately: mcp-remote with no cached
+    Notion token doesn't raise, it opens an interactive OAuth URL and waits
+    forever for a browser that will never visit it on a headless server -
+    an exception handler alone would never fire.
     """
     try:
-        return await build_fn()
-    except Exception as exc:  # noqa: BLE001 - any startup failure is handled the same way
+        return await asyncio.wait_for(build_fn(), timeout=_SPECIALIST_BUILD_TIMEOUT)
+    except TimeoutError:
+        print(
+            f"[agent] {name} timed out after {_SPECIALIST_BUILD_TIMEOUT}s during initialization "
+            "(likely stuck waiting on an interactive auth flow) - it will report itself unavailable"
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 - any other startup failure is handled the same way
         print(f"[agent] {name} failed to initialize, it will report itself unavailable: {exc}")
         return None
 
