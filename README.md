@@ -43,7 +43,7 @@ This repo is the companion code for a type-along video tutorial. See
 
 ```mermaid
 flowchart LR
-    Mic["🎙️ Microphone"] --> STT["OpenAI Whisper\n(speech to text)"]
+    Browser["Browser\n(record button, MediaRecorder)"] --> STT["OpenAI Whisper\n(speech to text)"]
     STT --> Orch["Orchestrator\ncreate_agent"]
     Orch -->|delegate| NE["notion_expert\ncreate_agent"]
     Orch -->|delegate| EE["email_expert\ncreate_agent"]
@@ -54,7 +54,7 @@ flowchart LR
     NotionMCP --> Notion[("Notion Workspace")]
     GmailMCP --> Gmail[("Gmail")]
     Orch --> TTS["OpenAI TTS\n(text to speech)"]
-    TTS --> Speaker["🔊 Speaker"]
+    TTS --> Browser
     Orch -.trace.-> LangSmith[("LangSmith")]
     NE -.trace.-> LangSmith
     EE -.trace.-> LangSmith
@@ -66,27 +66,26 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant M as main.py (voice loop)
+    participant B as Browser (webapp/server.py)
     participant W as Whisper API
     participant O as Orchestrator
     participant SP as Specialist agent
     participant T as MCP / search tools
     participant S as TTS API
 
-    U->>M: speaks a command
-    M->>M: record_audio() -> WAV file
-    M->>W: transcribe_audio(file)
-    W-->>M: transcript text
-    M->>O: ainvoke({messages: [...HumanMessage]})
+    U->>B: speaks a command (record button)
+    B->>W: transcribe_audio(uploaded audio)
+    W-->>B: transcript text
+    B->>O: ainvoke({messages: [...HumanMessage]})
     O->>O: decide: answer directly, or delegate?
     O->>SP: delegate tool call (notion_expert / email_expert / researcher)
     SP->>T: tool call(s) (MCP or search)
     T-->>SP: tool result
     SP-->>O: specialist's final answer
-    O-->>M: final spoken-friendly response
-    M->>S: synthesize_speech(response)
-    S-->>M: MP3 audio
-    M->>U: plays audio response
+    O-->>B: final spoken-friendly response
+    B->>S: synthesize_speech(response)
+    S-->>B: MP3 audio
+    B->>U: plays audio response (base64 in JSON)
 
     Note over O,SP: every step above is traced to LangSmith when configured
 ```
@@ -97,11 +96,9 @@ sequenceDiagram
 voice_notion_agent/
 ├── config.py             # env var loading + validation
 ├── mcp_client.py         # MultiServerMCPClient config for Gmail + Notion
-├── audio_io.py           # mic recording + speaker playback (best-effort)
 ├── stt.py                # OpenAI Whisper transcription
 ├── tts.py                # OpenAI TTS synthesis
 ├── agent.py              # Orchestrator: builds specialists, delegates via tools
-├── main.py               # CLI entry point (async voice loop and text loop)
 ├── agents/
 │   ├── notion_expert.py    # specialist: Notion MCP tools only
 │   ├── email_expert.py     # specialist: Gmail MCP tools only
@@ -156,30 +153,19 @@ render.yaml              # Render Docker-based web service config
    - Don't use the older `@notionhq/notion-mcp-server` package — it's
      deprecated and its token-based auth 400s on tool calls now.
 
-5. Run in **text mode** first (no microphone/speakers required) to verify
-   the agent and both MCP connections:
+5. Run the web app (see [Browser demo + deployment](#browser-demo--deployment)
+   below):
 
    ```bash
-   python -m voice_notion_agent.main --text
+   uvicorn webapp.server:app --reload --port 8000
    ```
 
-6. Run in **voice mode** once text mode works:
-
-   ```bash
-   python -m voice_notion_agent.main --seconds 6
-   ```
-
-   Use `--no-speak` to skip the TTS/playback step if you don't have a
-   speaker available (e.g. inside WSL2).
+   Open http://localhost:8000, hold the record button, and speak a
+   command — mic capture and playback happen entirely in the browser via
+   `MediaRecorder`/`<audio>`, so no local audio device setup is needed.
 
 ## Notes on platform quirks
 
-- Microphone access via `sounddevice` requires a real audio input device.
-  On WSL2 this often isn't available — use `--text` mode instead, or record
-  via a USB passthrough setup.
-- Speaker playback in `audio_io.play_audio` is best-effort: it uses `pydub`,
-  which shells out to `ffplay`/`avplay`/`aplay` if present. If none are
-  available it prints a note and continues instead of crashing.
 - The Gmail/Notion tokens cached at `~/.gmail-mcp/` and `~/.mcp-auth/` are
   tied to the machine that ran the one-time auth commands — they don't
   travel with the repo, and shouldn't be committed to it.
@@ -211,9 +197,9 @@ for showing the multi-agent routing on screen during a demo.
 
 ## Browser demo + deployment
 
-There's a small FastAPI web app in `webapp/` that reuses the exact same
-agent and tools — it just swaps the terminal mic/speaker loop for a
-browser record button.
+There's a small FastAPI web app in `webapp/` that fronts the same agent
+and tools with a browser record button — no local mic/speaker setup
+required, since capture and playback both happen in the browser.
 
 ```mermaid
 flowchart LR
@@ -234,8 +220,7 @@ uvicorn webapp.server:app --reload --port 8000
 ```
 
 Open http://localhost:8000, hold the record button, speak a command, and
-it plays the spoken reply back — same behavior as the CLI's voice mode,
-just in a browser tab.
+it plays the spoken reply back in the browser tab.
 
 ### ⚠️ Before exposing this publicly
 

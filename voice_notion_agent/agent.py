@@ -2,8 +2,8 @@
 delegates to a specialist sub-agent (Notion, Gmail, or web research).
 
     Orchestrator -> notion_expert  (Notion MCP tools)
-                 -> email_expert   (Gmail MCP tools)
-                 -> researcher     (web search + summarize)
+                -> email_expert   (Gmail MCP tools)
+                -> researcher     (web search + summarize)
 
 Each specialist is itself a full create_agent, wrapped as a plain tool so
 the Orchestrator can call it like any other tool. This keeps each
