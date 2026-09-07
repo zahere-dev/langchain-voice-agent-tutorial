@@ -145,11 +145,19 @@ render.yaml              # Render Docker-based web service config
    - Run once: `npx @gongrzhe/server-gmail-autoauth-mcp auth` — a browser
      opens for Google login, and a token is cached at
      `~/.gmail-mcp/credentials.json`.
+   - Run once: `npm install -g @gongrzhe/server-gmail-autoauth-mcp` — the
+     app launches this server as a plain global binary (`gmail-mcp`)
+     rather than via `npx` at request time, since `npx` does its own
+     registry check on every invocation even when the package is already
+     installed, and that check hanging on a flaky network is enough to
+     make Gmail time out and report itself unavailable.
 
 4. **One-time Notion auth:**
    - Run once: `npx -y mcp-remote https://mcp.notion.com/mcp` — a browser
      opens for a Notion OAuth consent screen, and a token is cached under
      `~/.mcp-auth/`.
+   - Run once: `npm install -g mcp-remote` — same reasoning as the Gmail
+     global install above; the app runs the `mcp-remote` binary directly.
    - Don't use the older `@notionhq/notion-mcp-server` package — it's
      deprecated and its token-based auth 400s on tool calls now.
 
